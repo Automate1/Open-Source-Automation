@@ -1,4 +1,4 @@
-﻿Imports System.Timers
+Imports System.Timers
 Imports System.IO.Ports
 Imports System.Threading.Thread
 Imports OSAE
@@ -25,14 +25,15 @@ Public Class DSCAlarm
     'Shared PartitionStatus(), PartitionStatusLast() As String
     Shared ZoneArray(32) As String
     Shared CommDown As Boolean
-    Shared LoginNeeded As Boolean
-    Shared Password As String
+    Shared LoginNeeded, CodeNeeded As Boolean
+    Shared Password, Code As String
     Shared client_socket As Socket
     Shared EthernetCom As Boolean
     Shared IPAddress As String
     Shared KeypadStatus As String
     Shared ShutdownNow As Boolean
     Shared MaxPartition As Integer = 1
+    Shared ErrorCode, UserNumber As Integer
     'Shared PartitionName() As String
     Public Class DSCPartition
         Public Name As String
@@ -58,7 +59,7 @@ Public Class DSCAlarm
         PartitionArmControlAway = 30
         PartitionArmControlStay = 31
         PartitionArmControlNoEntryDelay = 32
-        PartitionArmControl = 33
+        PartitionArmControlWithCode = 33
         PartitionDisarmControl = 40
         TimeSampControl = 55
         TimeDateBroadcastControl = 56
@@ -66,7 +67,7 @@ Public Class DSCAlarm
         VirtualKeypadControl = 58
         TriggerPanicAlarm = 60
         KeyPressed = 70
-        KeysString = 71
+        SendKeysString = 71
         EnterUserCodeProgramming = 72
         EnterUserProgramming = 73
         KeepAlive = 74
@@ -210,6 +211,22 @@ Public Class DSCAlarm
             'EthernetCom = False
             'End If
             Password = Left(OSAEObjectPropertyManager.GetObjectPropertyValue(pName, "Password").Value, 6)
+            Code = OSAEObjectPropertyManager.GetObjectPropertyValue(pName, "Code").Value
+
+            Select Case Code.Length
+                Case Is < 4
+                    logging.AddToLog("Warning, numeric security code is not set or too short!", True)
+                Case 4
+                    Code = Code & "00"
+                Case 5
+                    Code = Code & "0"
+                Case 6
+                    ' Six digit code
+                Case Else
+                    logging.AddToLog("Warning, numeric security code is too long!", True)
+                    Code = Left(Code, 6)
+            End Select
+
 
             'Check if alarm partition 1 object exists
             If OSAEObjectManager.GetObjectsByType("DSC ALARM PARTITION").Count = 0 Then
@@ -297,8 +314,42 @@ Public Class DSCAlarm
     End Sub
 
     Public Overrides Sub ProcessCommand(method As OSAEMethod)
-        Try
+        Dim MethodCommand, Parameter1, PartitionNum As String
 
+        Try
+            MethodCommand = method.MethodName
+            Parameter1 = method.Parameter1
+            PartitionNum = method.Address
+
+            Select Case MethodCommand
+                Case "ARMAWAY"
+                    SendCommand(CommandToString(Command.PartitionArmControlAway) & PartitionNum)
+                    logging.AddToLog("Sent command for partition " & PartitionNum.ToString & " Arm Away", True)
+                Case "ARMAWAYWITHCODE"
+                    SendCommand(CommandToString(Command.PartitionArmControlWithCode) & PartitionNum & method.Parameter1.ToString)
+                    logging.AddToLog("Sent command for partition " & PartitionNum.ToString & " Arm Away with code " & method.Parameter1.ToString, True)
+                Case "ARMSTAY"
+                    SendCommand(CommandToString(Command.PartitionArmControlStay) & PartitionNum)
+                    logging.AddToLog("Sent command for partition " & PartitionNum.ToString & " Arm Stay", True)
+                Case "ARMNOENTRYDELAY"
+                    SendCommand(CommandToString(Command.PartitionArmControlNoEntryDelay) & PartitionNum)
+                    logging.AddToLog("Sent command for partition " & PartitionNum.ToString & " Arm No Entry Delay", True)
+                Case "DISARM"
+                    SendCommand(CommandToString(Command.PartitionDisarmControl) & PartitionNum & Code)
+                    logging.AddToLog("Sent command for partition " & PartitionNum.ToString & " Disarm", True)
+                Case "DISARMWITHCODE"
+                    SendCommand(CommandToString(Command.PartitionDisarmControl) & PartitionNum & method.Parameter1.ToString)
+                    logging.AddToLog("Sent command for partition " & PartitionNum.ToString & " Disarm with code " & method.Parameter1.ToString, True)
+                Case "DLSDOWNLOAD"
+                    SendCommand(CommandToString(Command.SendKeysString) & "*8")
+                    SendCommand(CommandToString(Command.SendKeysString) & Parameter1.ToString)
+                    SendCommand(CommandToString(Command.SendKeysString) & "499")
+                    SendCommand(CommandToString(Command.SendKeysString) & Parameter1.ToString)
+                    SendCommand(CommandToString(Command.SendKeysString) & "499")
+                    logging.AddToLog("Sent command for DLS Download", True)
+                Case Else
+                    logging.AddToLog("Unrecognized command received by plugin", True)
+            End Select
         Catch ex As Exception
             logging.AddToLog("Error Processing Command " & ex.Message, True)
         End Try
@@ -359,6 +410,7 @@ Public Class DSCAlarm
     End Sub
 
     Protected Shared Sub SendCommand(message As String)
+        logging.AddToLog("Sending message: " & message, True)
 
         message &= CalcChecksum(message) & vbCrLf
         If EthernetCom Then
@@ -377,7 +429,6 @@ Public Class DSCAlarm
             End Try
 
         End If
-        logging.AddToLog("Sending message:" & message.TrimEnd & "| Message Lenght= " & message.Length.ToString, False)
     End Sub
     Sub InitSocket()
         Try
@@ -398,6 +449,11 @@ Public Class DSCAlarm
             If LoginNeeded Then
                 SendCommand(CommandToString(Command.NetworkLogin) & Password)
                 LoginNeeded = False
+            End If
+
+            If CodeNeeded Then
+                SendCommand(CommandToString(Command.CodeSend) & Code)
+                CodeNeeded = False
             End If
 
 
@@ -486,6 +542,10 @@ Public Class DSCAlarm
                                 logging.AddToLog("Unrecognized Login Response", True)
                         End Select
 
+                    Case Command.CodeRequired
+                        logging.AddToLog("Request for security code", True)
+                        CodeNeeded = True
+
                         'Partion State
                     Case Command.PartitionReady
                         PartitionState = "Ready"
@@ -524,6 +584,8 @@ Public Class DSCAlarm
                     Case Command.EntryDelayInProgress
                         PartitionState = "EntryDelayInProgress"
                         SetPartitionState(PartitionState, FirstValue)
+
+                        'The fillowing are logged but currently do no update any OSA properties
                     Case Command.KeypadLockout
                         KeypadStatus = "KeypadLockout"
                         logging.AddToLog("Keypad Lockout", True)
@@ -542,9 +604,13 @@ Public Class DSCAlarm
                     Case Command.FailedToArm
                         KeypadStatus = "FailedToArm"
                         logging.AddToLog("Failed To Arm", True)
+
+                        'Another partition state
                     Case Command.PartitionBusy
-                        KeypadStatus = "Busy"
-                        logging.AddToLog("Busy", True)
+                        PartitionState = "Busy"
+                        SetPartitionState(PartitionState, FirstValue)
+
+                        'Code required
                     Case Command.CodeRequired
                         KeypadStatus = "CodeRequired"
                         logging.AddToLog("Code Required", True)
@@ -615,39 +681,49 @@ Public Class DSCAlarm
                         OSAEObjectPropertyManager.ObjectPropertySet(Partition(1).Name, "LED" & LED, LEDStatus, pName)
 
                     Case Command.KeypadLEDState
-                        logging.AddToLog("Keypad LED State: " & Convert.ToString(Asc(mymessage.Substring(3, 1)), 16) & " " & Convert.ToString(Asc(mymessage.Substring(4, 1)), 16), True)
-                        LEDNum = CInt(mymessage.Substring(3, 2))
-                        Select Case LEDNum
-                            Case LEDNum And 1
-                                LED = "Ready"
-                                logging.AddToLog("LED Ready", True)
-                            Case LEDNum And 2
-                                LED = "Armed"
-                                logging.AddToLog("LED Armed", True)
-                            Case LEDNum And 4
-                                LED = "Memory"
-                                logging.AddToLog("LED Memory", True)
-                            Case LEDNum And 8
-                                LED = "Bypass"
-                                logging.AddToLog("LED Bypass", True)
-                            Case LEDNum And 16
-                                LED = "Trouble"
-                                logging.AddToLog("LED Trouble", True)
-                            Case LEDNum And 32
-                                LED = "Program"
-                                logging.AddToLog("LED Program", True)
-                            Case LEDNum And 64
-                                LED = "Fire"
-                                logging.AddToLog("LED Fire", True)
-                            Case LEDNum And 128
-                                LED = "Backlight"
-                                logging.AddToLog("LED Backlight", True)
-                        End Select
+                        logging.AddToLog("Keypad LED State: " & mymessage.Substring(3, 2), False)
+                        LEDNum = Convert.ToByte(mymessage.Substring(3, 2))
+                        LED = ""
+                        If LEDNum And 1 Then
+                            LED += "Ready"
+                            logging.AddToLog("LED Ready", True)
+                        End If
+
+                        If LEDNum And 2 Then
+                            LED += "Armed"
+                            logging.AddToLog("LED Armed", True)
+                        End If
+                        If LEDNum And 4 Then
+                            LED += "Memory"
+                            logging.AddToLog("LED Memory", True)
+                        End If
+
+                        If LEDNum And 8 Then
+                            LED += "Bypass"
+                            logging.AddToLog("LED Bypass", True)
+                        End If
+                        If LEDNum And 16 Then
+                            LED += "Trouble"
+                            logging.AddToLog("LED Trouble", True)
+                        End If
+                        If LEDNum And 32 Then
+                            LED += "Program"
+                            logging.AddToLog("LED Program", True)
+                        End If
+
+                        If LEDNum And 64 Then
+                            LED += "Fire"
+                            logging.AddToLog("LED Fire", True)
+                        End If
+                        If LEDNum And 128 Then
+                            LED += "Backlight"
+                            logging.AddToLog("LED Backlight", True)
+                        End If
 
                         OSAEObjectPropertyManager.ObjectPropertySet(Partition(1).Name, "LED" & LED, LEDStatus, pName)
 
                     Case Command.KeypadLEDFlashState
-                        logging.AddToLog("Keypad LED Flash State: " & Convert.ToString(Asc(mymessage.Substring(3, 1)), 16) & " " & Convert.ToString(Asc(mymessage.Substring(4, 1)), 16), True)
+                        logging.AddToLog("Keypad LED Flash State: " & Convert.ToString(Asc(mymessage.Substring(3, 1)), 16) & " " & Convert.ToString(Asc(mymessage.Substring(4, 1)), 16), False)
                         LEDNum = CInt(mymessage.Substring(3, 2))
                         Select Case LEDNum
                             Case LEDNum And 1
@@ -678,6 +754,7 @@ Public Class DSCAlarm
 
                         OSAEObjectPropertyManager.ObjectPropertySet(Partition(1).Name, "LED" & LED, LEDStatus, pName)
 
+                        'Zone status
                     Case Command.ZoneOpen, Command.ZoneRestored
                         ZoneString = mymessage.Substring(4, 2)
                         ZoneInt = CInt(ZoneString)
@@ -699,13 +776,38 @@ Public Class DSCAlarm
                             End If
                         End If
 
+                    Case Command.CommandError
+                        logging.AddToLog("Response from alarm 'Command Error'", True)
+
+                    Case Command.SystemError
+                        ErrorCode = CInt(mymessage.Substring(3, 3))
+
+                        logging.AddToLog("Response from alarm 'System Error' code " & ErrorCode.ToString, True)
+
+
+
                     Case Command.SoftwareVersion
                         SoftwareVersion = mymessage.Substring(3, 6)
                         OSAEObjectPropertyManager.ObjectPropertySet(pName, "SoftwareVersion", SoftwareVersion, pName)
                         logging.AddToLog("Software Version " & SoftwareVersion, True)
 
                     Case Command.VerboseTroubleStatus
-                        logging.AddToLog("Verbose Trouble Status: " & Convert.ToString(Asc(mymessage.Substring(3, 1)), 16) & " " & Convert.ToString(Asc(mymessage.Substring(4, 1)), 16), True)
+                        UserNumber = CInt(mymessage.Substring(3, 3))
+                        logging.AddToLog("Verbose Trouble Status: " & Convert.ToString(Asc(mymessage.Substring(3, 1)), 16) & " " & Convert.ToString(Asc(mymessage.Substring(4, 1)), 16), False)
+
+                    Case Command.UserOpening
+                        UserNumber = CInt(mymessage.Substring(4, 4))
+                        logging.AddToLog("User " & "User number durned off partion " & "partion alarm active", True)
+                        OSAE.OSAEObjectPropertyManager.ObjectPropertySet(Partition(FirstValue).Name, "OpenUser", UserNumber.ToString, pName)
+                        logging.EventLogAdd(Partition(FirstValue).Name, "UserOpening", UserNumber.ToString, vbNull)
+
+                    Case Command.UserClosing
+                        'Parse for users number
+                        UserNumber = CInt(mymessage.Substring(4, 4))
+                        logging.AddToLog("User " & "User number set partion " & "partion alarm active", True)
+                        OSAE.OSAEObjectPropertyManager.ObjectPropertySet(Partition(FirstValue).Name, "OpenUser", UserNumber.ToString, pName)
+                        logging.EventLogAdd(Partition(FirstValue).Name, "UserClosing", UserNumber.ToString, vbNull)
+
                     Case Else
                         logging.AddToLog("Command not configured for message:" & mymessage, True)
                 End Select
@@ -880,4 +982,3 @@ Public Class StateObject
     ' Received data string.
     Public sb As New StringBuilder
 End Class 'StateObject
-
