@@ -1,4 +1,4 @@
-﻿CALL osae_sp_object_type_add ('DSC ALARM','DSC Alarm Panel','','PLUGIN',1,0,0,0);
+CALL osae_sp_object_type_add ('DSC ALARM','DSC Alarm Panel','','PLUGIN',1,0,0,0);
 CALL osae_sp_object_type_state_add ('ON','Running','DSC ALARM');
 CALL osae_sp_object_type_state_add ('OFF','Stopped','DSC ALARM');
 CALL osae_sp_object_type_event_add ('ON','Started','DSC ALARM');
